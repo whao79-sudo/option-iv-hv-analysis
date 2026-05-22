@@ -294,15 +294,18 @@ def implied_volatility(market_price, S, K, T, r, q=0):
     if market_price < intrinsic_value:
         return None
     
-    # 波动率搜索范围：0.01 到 5.0（1% 到 500%）
-    try:
-        iv = brentq(
-            lambda sigma: bs_call_price(S, K, T, r, sigma, q) - market_price,
-            0.01, 5.0
-        )
-        return iv * 100  # 转换为百分比
-    except:
-        return None
+    # 波动率搜索范围：0.001 到 10.0（0.1% 到 1000%）
+    # 先用 0.1%-500% 的范围
+    for low, high in [(0.001, 5.0), (0.00001, 0.001), (5.0, 10.0)]:
+        try:
+            iv = brentq(
+                lambda sigma: bs_call_price(S, K, T, r, sigma, q) - market_price,
+                low, high
+            )
+            return iv * 100  # 转换为百分比
+        except:
+            continue
+    return None
 
 # 参数设置
 risk_free_rate = 0.025  # 无风险利率 2.5%
@@ -376,30 +379,33 @@ print(f"IV 有效值: {iv_valid}/{len(analysis_clean)} ({iv_valid/len(analysis_c
 # ============================================================================
 print("\n生成图表...")
 
-# 设置中文字体
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+# 设置字体（使用文泉驿微米黑支持中文）
+from matplotlib.font_manager import FontProperties
+zh_font = FontProperties(fname='/usr/share/fonts/wqy-microhei/wqy-microhei.ttc')
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
 # 创建图表
 fig, axes = plt.subplots(4, 1, figsize=(14, 16), sharex=True)
-fig.suptitle('创业板 ETF 购 12 月 1450 期权分析 (2024-06 至 2024-12)', fontsize=16, fontweight='bold')
+fig.suptitle('Option IV/HV Analysis: Growth ETF Call Dec 1450 (Jun-Dec 2024)', fontsize=16, fontweight='bold')
 
 # 图 1: 期权价格走势（用结算价，更准确）
 ax1 = axes[0]
 # 使用 clean 数据
-ax1.fill_between(analysis_clean['date'], analysis_clean['option_close'], alpha=0.3, color='red', label='收盘价')
-ax1.plot(analysis_clean['date'], analysis_clean['option_close'], color='red', linewidth=1.5, label='期权收盘价')
-ax1.set_ylabel('期权价格 (元)', fontsize=11)
-ax1.set_title('期权价格走势图', fontsize=12, fontweight='bold')
+ax1.fill_between(analysis_clean['date'], analysis_clean['option_close'], alpha=0.3, color='red', label='Close')
+ax1.plot(analysis_clean['date'], analysis_clean['option_close'], color='red', linewidth=1.5, label='Option Close')
+ax1.set_ylabel('Option Price (CNY)', fontsize=11)
+ax1.set_title('Option Price Trend', fontsize=12, fontweight='bold')
 ax1.legend(loc='upper right')
 ax1.grid(True, alpha=0.3)
 ax1.set_ylim(bottom=0)
 
 # 图 2: ETF 价格走势（只保留有期权交易的交易日）
 ax2 = axes[1]
-ax2.plot(analysis_clean['date'], analysis_clean['etf_close'], color='blue', linewidth=1.5, label='159915 收盘价')
-ax2.set_ylabel('ETF 价格 (元)', fontsize=11)
-ax2.set_title('标的资产 (159915) 价格走势（仅期权交易日）', fontsize=12, fontweight='bold')
+ax2.plot(analysis_clean['date'], analysis_clean['etf_close'], color='blue', linewidth=1.5, label='159915 Close')
+ax2.set_ylabel('ETF Price (CNY)', fontsize=11)
+ax2.set_title('Underlying Asset (159915) Price', fontsize=12, fontweight='bold')
 ax2.legend(loc='upper right')
 ax2.grid(True, alpha=0.3)
 
@@ -409,11 +415,11 @@ valid_iv = analysis_clean[analysis_clean['iv'].notna()]
 valid_hv20 = analysis_clean[analysis_clean['hv_20'].notna()]
 valid_hv60 = analysis_clean[analysis_clean['hv_60'].notna()]
 
-ax3.plot(valid_iv['date'], valid_iv['iv'], color='red', linewidth=1.5, label='IV (隐含波动率)', marker='.', markersize=3)
-ax3.plot(valid_hv20['date'], valid_hv20['hv_20'], color='green', linewidth=1.5, label='HV20 (20 日历史波动率)', linestyle='--')
-ax3.plot(valid_hv60['date'], valid_hv60['hv_60'], color='orange', linewidth=1.5, label='HV60 (60 日历史波动率)', linestyle='-.')
-ax3.set_ylabel('波动率 (%)', fontsize=11)
-ax3.set_title('IV 与 HV 对比图', fontsize=12, fontweight='bold')
+ax3.plot(valid_iv['date'], valid_iv['iv'], color='red', linewidth=1.5, label='IV (Implied Vol)', marker='.', markersize=3)
+ax3.plot(valid_hv20['date'], valid_hv20['hv_20'], color='green', linewidth=1.5, label='HV20 (20d Hist Vol)', linestyle='--')
+ax3.plot(valid_hv60['date'], valid_hv60['hv_60'], color='orange', linewidth=1.5, label='HV60 (60d Hist Vol)', linestyle='-.')
+ax3.set_ylabel('Volatility (%)', fontsize=11)
+ax3.set_title('IV vs HV Comparison', fontsize=12, fontweight='bold')
 ax3.legend(loc='upper right')
 ax3.grid(True, alpha=0.3)
 ax3.set_ylim(bottom=0)
@@ -427,9 +433,9 @@ ax4.fill_between(valid_diff20['date'], valid_diff20['iv_hv20_diff'], alpha=0.3, 
 ax4.plot(valid_diff20['date'], valid_diff20['iv_hv20_diff'], color='purple', linewidth=1.5, label='IV - HV20')
 ax4.plot(valid_diff60['date'], valid_diff60['iv_hv60_diff'], color='brown', linewidth=1.5, label='IV - HV60', linestyle='--')
 ax4.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
-ax4.set_ylabel('差值 (%)', fontsize=11)
-ax4.set_xlabel('日期', fontsize=11)
-ax4.set_title('IV-HV 差值图（溢价/折价）', fontsize=12, fontweight='bold')
+ax4.set_ylabel('Spread (%)', fontsize=11)
+ax4.set_xlabel('Date', fontsize=11)
+ax4.set_title('IV - HV Spread (Premium/Discount)', fontsize=12, fontweight='bold')
 ax4.legend(loc='upper right')
 ax4.grid(True, alpha=0.3)
 
