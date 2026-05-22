@@ -182,22 +182,36 @@ option_df.to_csv('data/option_data.csv', index=False, encoding='utf-8-sig')
 print("期权数据已保存到 data/option_data.csv")
 
 # ============================================================================
-# 2. 从 akshare 下载 159915 数据
+# 2. 获取 159915 数据（优先使用本地缓存）
 # ============================================================================
-print("\n从 akshare 下载 159915 数据...")
+print("\n获取 159915 数据...")
 
-# 下载数据（提前 3 个月开始，即 2024-04-01）
-start_date = '20240401'
-end_date = expiration_date.strftime('%Y%m%d')
-print(f"下载日期范围：{start_date} 到 {end_date}")
+etf_csv_path = 'data/159915_data.csv'
+need_download = True
 
-etf_df = ak.fund_etf_hist_em(
-    symbol="159915",
-    period="daily",
-    start_date=start_date,
-    end_date=end_date,
-    adjust=""  # 不复权
-)
+if os.path.exists(etf_csv_path):
+    # 检查文件是否今天下载的（避免过期）
+    file_mtime = datetime.fromtimestamp(os.path.getmtime(etf_csv_path))
+    file_age_hours = (datetime.now() - file_mtime).total_seconds() / 3600
+    
+    etf_df = pd.read_csv(etf_csv_path)
+    if 'date' in etf_df.columns and 'close' in etf_df.columns:
+        need_download = False
+        print(f"使用本地缓存数据 (来自 {file_mtime.strftime('%Y-%m-%d %H:%M')})")
+
+if need_download:
+    print("从 akshare 下载 159915 数据...")
+    start_date = '20240401'
+    end_date = expiration_date.strftime('%Y%m%d')
+    print(f"下载日期范围：{start_date} 到 {end_date}")
+    
+    etf_df = ak.fund_etf_hist_em(
+        symbol="159915",
+        period="daily",
+        start_date=start_date,
+        end_date=end_date,
+        adjust=""  # 不复权
+    )
 
 # 重命名列
 etf_df = etf_df.rename(columns={
@@ -296,7 +310,7 @@ dividend_yield = 0.0    # 股息率 0
 
 # 合并期权数据和 ETF 数据
 merged_df = pd.merge(option_df, etf_df[['date', 'close']], on='date', how='left', suffixes=('_option', '_etf'))
-merged_df = merged_df.rename(columns={'close_option': 'option_close', 'close_etf': 'etf_close'})
+merged_df = merged_df.rename(columns={'close_option': 'option_close', 'close_etf': 'etf_close', 'settlement': 'settlement'})
 
 # 计算 IV
 ivs = []
@@ -309,8 +323,8 @@ for idx, row in merged_df.iterrows():
         ivs.append(None)
         continue
     
-    # 计算 IV
-    iv = implied_volatility(
+    # 计算 IV（用结算价代替收盘价，因为收盘价可能低于内在价值导致无法反推）
+    iv_from_close = implied_volatility(
         market_price=row['option_close'],
         S=row['etf_close'],
         K=strike_price,
@@ -318,6 +332,16 @@ for idx, row in merged_df.iterrows():
         r=risk_free_rate,
         q=dividend_yield
     )
+    iv_from_settle = implied_volatility(
+        market_price=row['settlement'],
+        S=row['etf_close'],
+        K=strike_price,
+        T=T,
+        r=risk_free_rate,
+        q=dividend_yield
+    )
+    # 优先用结算价反推的 IV，如果结算价也不行则用收盘价
+    iv = iv_from_settle if iv_from_settle is not None else iv_from_close
     ivs.append(iv)
 
 merged_df['iv'] = ivs
@@ -331,9 +355,21 @@ analysis_df = pd.merge(analysis_df, etf_df[['date', 'hv_20', 'hv_60']], on='date
 analysis_df['iv_hv20_diff'] = analysis_df['iv'] - analysis_df['hv_20']
 analysis_df['iv_hv60_diff'] = analysis_df['iv'] - analysis_df['hv_60']
 
+# 只保留有 ETF 价格的记录（去除周末等非交易日），并按日期排序
+analysis_clean = analysis_df[analysis_df['etf_close'].notna()].copy()
+analysis_clean = analysis_clean.sort_values('date').reset_index(drop=True)
+# 使用 datetime 类型用于绘图
+analysis_clean['date'] = pd.to_datetime(analysis_clean['date'])
+
+print(f"\n清洗后数据: {len(analysis_clean)} 条交易日记录 (原 {len(analysis_df)} 条)")
+
 # 保存分析数据
-analysis_df.to_csv('data/analysis_data.csv', index=False, encoding='utf-8-sig')
+analysis_clean.to_csv('data/analysis_data.csv', index=False, encoding='utf-8-sig')
 print("分析数据已保存到 data/analysis_data.csv")
+
+# 统计 IV 计算成功率
+iv_valid = analysis_clean['iv'].notna().sum()
+print(f"IV 有效值: {iv_valid}/{len(analysis_clean)} ({iv_valid/len(analysis_clean)*100:.1f}%)")
 
 # ============================================================================
 # 5. 生成图表
@@ -348,29 +384,34 @@ plt.rcParams['axes.unicode_minus'] = False
 fig, axes = plt.subplots(4, 1, figsize=(14, 16), sharex=True)
 fig.suptitle('创业板 ETF 购 12 月 1450 期权分析 (2024-06 至 2024-12)', fontsize=16, fontweight='bold')
 
-# 图 1: 期权 K 线
+# 图 1: 期权价格走势（用结算价，更准确）
 ax1 = axes[0]
-ax1.fill_between(analysis_df['date'], analysis_df['option_close'], alpha=0.3, color='red', label='收盘价')
-ax1.plot(analysis_df['date'], analysis_df['option_close'], color='red', linewidth=1.5, label='期权收盘价')
+# 使用 clean 数据
+ax1.fill_between(analysis_clean['date'], analysis_clean['option_close'], alpha=0.3, color='red', label='收盘价')
+ax1.plot(analysis_clean['date'], analysis_clean['option_close'], color='red', linewidth=1.5, label='期权收盘价')
 ax1.set_ylabel('期权价格 (元)', fontsize=11)
 ax1.set_title('期权价格走势图', fontsize=12, fontweight='bold')
 ax1.legend(loc='upper right')
 ax1.grid(True, alpha=0.3)
 ax1.set_ylim(bottom=0)
 
-# 图 2: ETF 价格走势
+# 图 2: ETF 价格走势（只保留有期权交易的交易日）
 ax2 = axes[1]
-ax2.plot(etf_df['date'], etf_df['close'], color='blue', linewidth=1.5, label='159915 收盘价')
+ax2.plot(analysis_clean['date'], analysis_clean['etf_close'], color='blue', linewidth=1.5, label='159915 收盘价')
 ax2.set_ylabel('ETF 价格 (元)', fontsize=11)
-ax2.set_title('标的资产 (159915) 价格走势', fontsize=12, fontweight='bold')
+ax2.set_title('标的资产 (159915) 价格走势（仅期权交易日）', fontsize=12, fontweight='bold')
 ax2.legend(loc='upper right')
 ax2.grid(True, alpha=0.3)
 
-# 图 3: IV 和 HV 对比
+# 图 3: IV 和 HV 对比（只画有有效值的点，不连空值）
 ax3 = axes[2]
-ax3.plot(analysis_df['date'], analysis_df['iv'], color='red', linewidth=1.5, label='IV (隐含波动率)', marker='o', markersize=3)
-ax3.plot(analysis_df['date'], analysis_df['hv_20'], color='green', linewidth=1.5, label='HV20 (20 日历史波动率)', linestyle='--')
-ax3.plot(analysis_df['date'], analysis_df['hv_60'], color='orange', linewidth=1.5, label='HV60 (60 日历史波动率)', linestyle='-.')
+valid_iv = analysis_clean[analysis_clean['iv'].notna()]
+valid_hv20 = analysis_clean[analysis_clean['hv_20'].notna()]
+valid_hv60 = analysis_clean[analysis_clean['hv_60'].notna()]
+
+ax3.plot(valid_iv['date'], valid_iv['iv'], color='red', linewidth=1.5, label='IV (隐含波动率)', marker='.', markersize=3)
+ax3.plot(valid_hv20['date'], valid_hv20['hv_20'], color='green', linewidth=1.5, label='HV20 (20 日历史波动率)', linestyle='--')
+ax3.plot(valid_hv60['date'], valid_hv60['hv_60'], color='orange', linewidth=1.5, label='HV60 (60 日历史波动率)', linestyle='-.')
 ax3.set_ylabel('波动率 (%)', fontsize=11)
 ax3.set_title('IV 与 HV 对比图', fontsize=12, fontweight='bold')
 ax3.legend(loc='upper right')
@@ -379,9 +420,12 @@ ax3.set_ylim(bottom=0)
 
 # 图 4: IV-HV 差值
 ax4 = axes[3]
-ax4.fill_between(analysis_df['date'], analysis_df['iv_hv20_diff'], alpha=0.3, color='purple', label='IV-HV20')
-ax4.plot(analysis_df['date'], analysis_df['iv_hv20_diff'], color='purple', linewidth=1.5, label='IV - HV20')
-ax4.plot(analysis_df['date'], analysis_df['iv_hv60_diff'], color='brown', linewidth=1.5, label='IV - HV60', linestyle='--')
+valid_diff20 = analysis_clean[analysis_clean['iv_hv20_diff'].notna()]
+valid_diff60 = analysis_clean[analysis_clean['iv_hv60_diff'].notna()]
+
+ax4.fill_between(valid_diff20['date'], valid_diff20['iv_hv20_diff'], alpha=0.3, color='purple', label='IV-HV20')
+ax4.plot(valid_diff20['date'], valid_diff20['iv_hv20_diff'], color='purple', linewidth=1.5, label='IV - HV20')
+ax4.plot(valid_diff60['date'], valid_diff60['iv_hv60_diff'], color='brown', linewidth=1.5, label='IV - HV60', linestyle='--')
 ax4.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
 ax4.set_ylabel('差值 (%)', fontsize=11)
 ax4.set_xlabel('日期', fontsize=11)
@@ -413,26 +457,26 @@ summary = {
     "期权合约": "创业板 ETF 购 12 月 1450",
     "行权价": strike_price,
     "到期日": expiration_date.strftime('%Y-%m-%d'),
-    "数据起始日": analysis_df['date'].min().strftime('%Y-%m-%d'),
-    "数据结束日": analysis_df['date'].max().strftime('%Y-%m-%d'),
-    "交易天数": len(analysis_df),
+    "数据起始日": analysis_clean['date'].min().strftime('%Y-%m-%d'),
+    "数据结束日": analysis_clean['date'].max().strftime('%Y-%m-%d'),
+    "交易天数": len(analysis_clean),
     "无风险利率": f"{risk_free_rate*100}%",
     "股息率": f"{dividend_yield*100}%",
-    "期权最高价": f"{analysis_df['option_close'].max():.4f} 元",
-    "期权最低价": f"{analysis_df['option_close'].min():.4f} 元",
-    "期权平均价": f"{analysis_df['option_close'].mean():.4f} 元",
-    "ETF 最高价": f"{etf_df['close'].max():.4f} 元",
-    "ETF 最低价": f"{etf_df['close'].min():.4f} 元",
-    "ETF 平均价": f"{etf_df['close'].mean():.4f} 元",
-    "IV 最大值": f"{analysis_df['iv'].max():.2f}%" if analysis_df['iv'].notna().any() else "N/A",
-    "IV 最小值": f"{analysis_df['iv'].min():.2f}%" if analysis_df['iv'].notna().any() else "N/A",
-    "IV 平均值": f"{analysis_df['iv'].mean():.2f}%" if analysis_df['iv'].notna().any() else "N/A",
-    "HV20 最大值": f"{analysis_df['hv_20'].max():.2f}%",
-    "HV20 最小值": f"{analysis_df['hv_20'].min():.2f}%",
-    "HV20 平均值": f"{analysis_df['hv_20'].mean():.2f}%",
-    "HV60 最大值": f"{analysis_df['hv_60'].max():.2f}%",
-    "HV60 最小值": f"{analysis_df['hv_60'].min():.2f}%",
-    "HV60 平均值": f"{analysis_df['hv_60'].mean():.2f}%",
+    "期权最高价": f"{analysis_clean['option_close'].max():.4f} 元",
+    "期权最低价": f"{analysis_clean['option_close'].min():.4f} 元",
+    "期权平均价": f"{analysis_clean['option_close'].mean():.4f} 元",
+    "ETF 最高价": f"{analysis_clean['etf_close'].max():.4f} 元",
+    "ETF 最低价": f"{analysis_clean['etf_close'].min():.4f} 元",
+    "ETF 平均价": f"{analysis_clean['etf_close'].mean():.4f} 元",
+    "IV 最大值": f"{analysis_clean['iv'].max():.2f}%" if analysis_clean['iv'].notna().any() else "N/A",
+    "IV 最小值": f"{analysis_clean['iv'].min():.2f}%" if analysis_clean['iv'].notna().any() else "N/A",
+    "IV 平均值": f"{analysis_clean['iv'].mean():.2f}%" if analysis_clean['iv'].notna().any() else "N/A",
+    "HV20 最大值": f"{analysis_clean['hv_20'].max():.2f}%",
+    "HV20 最小值": f"{analysis_clean['hv_20'].min():.2f}%",
+    "HV20 平均值": f"{analysis_clean['hv_20'].mean():.2f}%",
+    "HV60 最大值": f"{analysis_clean['hv_60'].max():.2f}%",
+    "HV60 最小值": f"{analysis_clean['hv_60'].min():.2f}%",
+    "HV60 平均值": f"{analysis_clean['hv_60'].mean():.2f}%",
 }
 
 # 保存统计摘要
